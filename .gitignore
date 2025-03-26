@@ -1,0 +1,56 @@
+# Python artifacts
+*.py[cod]
+__pycache__/
+*.so
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Django stuff
+*.log
+*.pot
+*.pyc
+*.pyo
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Media
+media/
+
+# Static files (if generated)
+staticfiles/
+
+# Test and coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node modules (if any)
+node_modules/
+
+# dotenv
+*.env
+
+# Backup files
+*~
