@@ -831,9 +831,10 @@ class InviteEmployeeView(APIView):
         request_body=EmployeeInviteSerializer,
         responses={
             200: openapi.Response("Invitation sent to employee"),
-            400: "Employee limit reached, email already exists, or invalid input",
+            400: "Invalid input",
             401: "Authentication required",
             403: "Not authorized (not a company account)",
+            409: "Email already registered",
             500: "Internal server error"
         }
     )
@@ -860,7 +861,10 @@ class InviteEmployeeView(APIView):
 
             # Check if email already exists
             if CustomUser.objects.filter(email=email).exists():
-                return Response({"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"error": "A user with this email already exists in the system. They cannot be invited as an employee."}, 
+                    status=status.HTTP_409_CONFLICT
+                )
                                 
             # Generate a unique token for this invitation
             invite_token = str(uuid4())
@@ -912,6 +916,7 @@ class CompleteEmployeeRegistrationView(APIView):
             201: openapi.Response("Registration completed successfully"),
             400: "Invalid token or data",
             404: "Invitation not found or expired",
+            409: "Email already registered",
             500: "Internal server error"
         }
     )
@@ -932,6 +937,13 @@ class CompleteEmployeeRegistrationView(APIView):
             invitation = json.loads(invitation_json)
             email = invitation["email"]
             company_id = invitation["company_id"]
+            
+            # Check if user with this email already exists
+            if CustomUser.objects.filter(email=email).exists():
+                return Response(
+                    {"error": "This email is already registered. Please contact your company administrator."}, 
+                    status=status.HTTP_409_CONFLICT
+                )
             
             # Get company
             try:
