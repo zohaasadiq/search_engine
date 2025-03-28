@@ -164,7 +164,7 @@ class VerifyIndividualOTPView(APIView):
         request_body=VerifyOTPSerializer,
         responses={
             200: openapi.Response("OTP verified, proceed with registration"),
-            400: "Invalid OTP"
+            400: "Invalid or expired OTP"
         }
     )
     def post(self, request):
@@ -178,7 +178,10 @@ class VerifyIndividualOTPView(APIView):
             otp = data["otp"]
 
             stored_otp = redis_client.get(f"otp:{email}")
-            if not stored_otp or stored_otp != otp:
+            if not stored_otp:
+                return Response({"error": "OTP expired or not found"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if stored_otp != otp:
                 return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
             
             # Save verification status in Redis
@@ -312,7 +315,7 @@ class VerifyCompanyOTPView(APIView):
         request_body=VerifyOTPSerializer,
         responses={
             200: openapi.Response("OTP verified, proceed with registration"),
-            400: "Invalid OTP"
+            400: "Invalid or expired OTP"
         }
     )
     def post(self, request):
@@ -326,7 +329,10 @@ class VerifyCompanyOTPView(APIView):
             otp = data["otp"]
 
             stored_otp = redis_client.get(f"otp:{email}")
-            if not stored_otp or stored_otp != otp:
+            if not stored_otp:
+                return Response({"error": "OTP expired or not found"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if stored_otp != otp:
                 return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
             
             # Save verification status in Redis
@@ -726,7 +732,7 @@ class ResetPasswordView(APIView):
         request_body=ResetPasswordSerializer,
         responses={
             200: openapi.Response("Password reset successful"),
-            400: "Invalid OTP or invalid input",
+            400: "Invalid or expired OTP or invalid input",
             404: "Email not registered"
         }
     )
@@ -749,7 +755,10 @@ class ResetPasswordView(APIView):
 
             # Verify OTP
             stored_otp = redis_client.get(f"reset_otp:{email}")
-            if not stored_otp or stored_otp != otp:
+            if not stored_otp:
+                return Response({"error": "OTP expired or not found"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if stored_otp != otp:
                 return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
             
             # Set new password
