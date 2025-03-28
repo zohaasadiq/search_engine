@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 from django.contrib.auth import get_user_model
 from uuid import uuid4
 from django.urls import reverse
+from django.db import transaction
+from django.http import Http404
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -30,7 +32,7 @@ from .serializers import (
     AddEmployeeSerializer, LoginSerializer,
     CustomUserSerializer, IndividualUserSerializer, CompanySerializer, EmployeeSerializer,
     ForgotPasswordSerializer, ResetPasswordSerializer, ChangePasswordSerializer,
-    EmployeeInviteSerializer, CompleteEmployeeRegistrationSerializer
+    EmployeeInviteSerializer, CompleteEmployeeRegistrationSerializer, EmployeeListSerializer
 )
 
 load_dotenv()
@@ -990,4 +992,117 @@ class CompleteEmployeeRegistrationView(APIView):
             return Response(employee_data, status=status.HTTP_201_CREATED)
         except Exception as e:
             return Response({"error": "Registration failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ---- Company Employees Management (List and Delete) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class CompanyEmployeesView(APIView):
+    """
+    List and manage company employees.
+    GET: List all employees
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        responses={
+            200: openapi.Response("List of company employees", EmployeeListSerializer(many=True)),
+            403: "Not authorized (not a company account)",
+            404: "Company profile not found",
+            500: "Internal server error"
+        }
+    )
+    def get(self, request):
+        """List all employees for the company"""
+        try:
+            user = request.user
+            
+            if not user.is_company:
+                return Response(
+                    {"error": "Only company accounts can access employee lists"}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            try:
+                company = Company.objects.get(user=user)
+            except Company.DoesNotExist:
+                return Response(
+                    {"error": "Company profile not found"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+                
+            employees = Employee.objects.filter(company=company)
+            serializer = EmployeeListSerializer(employees, many=True)
+            
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {"error": "Failed to retrieve employees", "details": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class CompanyEmployeeDetailView(APIView):
+    """
+    Manage individual employee.
+    DELETE: Remove an employee
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_employee(self, employee_id, company):
+        """Helper to get employee and verify ownership"""
+        try:
+            return Employee.objects.get(user_id=employee_id, company=company)
+        except Employee.DoesNotExist:
+            raise Http404("Employee not found or does not belong to your company")
+
+    @swagger_auto_schema(
+        responses={
+            204: "Employee deleted successfully",
+            403: "Not authorized (not a company account)",
+            404: "Employee not found or company profile not found",
+            500: "Internal server error"
+        }
+    )
+    def delete(self, request, employee_id):
+        """Delete an employee from the company"""
+        try:
+            user = request.user
+            
+            if not user.is_company:
+                return Response(
+                    {"error": "Only company accounts can delete employees"}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            try:
+                company = Company.objects.get(user=user)
+            except Company.DoesNotExist:
+                return Response(
+                    {"error": "Company profile not found"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get employee and verify ownership
+            try:
+                employee = self.get_employee(employee_id, company)
+            except Http404 as e:
+                return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Delete employee and associated user account
+            with transaction.atomic():
+                # Get the user account
+                user_account = employee.user
+                # Delete the employee record
+                employee.delete()
+                # Delete the user account
+                user_account.delete()
+            
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            return Response(
+                {"error": "Failed to delete employee", "details": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 

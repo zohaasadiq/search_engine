@@ -120,3 +120,15 @@ class CompleteEmployeeRegistrationSerializer(serializers.Serializer):
     phone_number = serializers.CharField()
     date_of_birth = serializers.DateField()
     terms_and_conditions = serializers.BooleanField()
+
+
+class EmployeeListSerializer(serializers.ModelSerializer):
+    """Serializer for listing company employees"""
+    user_id = serializers.CharField(source='user.id')
+    email = serializers.EmailField(source='user.email')
+    is_active = serializers.BooleanField(source='user.is_active')
+    
+    class Meta:
+        model = Employee
+        fields = ('user_id', 'email', 'first_name', 'last_name', 'phone_number', 
+                  'date_of_birth', 'joining_date', 'end_of_contract_date', 'is_active')

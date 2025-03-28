@@ -3,6 +3,7 @@ from .views import (
     IndividualSignupView, VerifyIndividualOTPView, CompleteIndividualRegistrationView,
     CompanySignupView, VerifyCompanyOTPView, CompleteCompanyRegistrationView,
     InviteEmployeeView, CompleteEmployeeRegistrationView,
+    CompanyEmployeesView, CompanyEmployeeDetailView,
     SaveQueryView, LoginView, LogoutView, GetQueriesByUserView, GetQueryResponseByIdView, CheckSubscriptionView, CreateCheckoutSessionView,
     ForgotPasswordView, ResetPasswordView, ChangePasswordView
 )
@@ -30,6 +31,8 @@ urlpatterns = [
     # Employee Management
     path("company/invite-employee/", InviteEmployeeView.as_view(), name="invite_employee"),
     path("employee/complete-registration/", CompleteEmployeeRegistrationView.as_view(), name="complete_employee_registration"),
+    path("company/employees/", CompanyEmployeesView.as_view(), name="company_employees"),
+    path("company/employees/<str:employee_id>/", CompanyEmployeeDetailView.as_view(), name="company_employee_detail"),
 
     # Query Management
     path("save-query/", SaveQueryView.as_view(), name="save_query"),
