@@ -946,7 +946,10 @@ class CompleteEmployeeRegistrationView(APIView):
                 is_company=False,
             )
             
-            # Create employee record
+            # Create employee record with today's date as joining_date
+            from django.utils import timezone
+            current_date = timezone.now().date()
+            
             employee = Employee.objects.create(
                 user=custom_user,
                 company=company,
@@ -954,8 +957,8 @@ class CompleteEmployeeRegistrationView(APIView):
                 last_name=data["last_name"],
                 phone_number=data["phone_number"],
                 date_of_birth=data["date_of_birth"],
-                joining_date=None,  # Company can update later if needed
-                end_of_contract_date=None,  # Company can update later if needed
+                joining_date=current_date,  # Set to current date instead of None
+                end_of_contract_date=None,  # This field is nullable
             )
             
             # Clean up Redis
