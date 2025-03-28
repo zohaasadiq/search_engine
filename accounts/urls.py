@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     IndividualSignupView, VerifyIndividualOTPView, CompleteIndividualRegistrationView,
     CompanySignupView, VerifyCompanyOTPView, CompleteCompanyRegistrationView,
-    AddEmployeeView, InviteEmployeeView, CompleteEmployeeRegistrationView,
+    InviteEmployeeView, CompleteEmployeeRegistrationView,
     SaveQueryView, LoginView, LogoutView, GetQueriesByUserView, GetQueryResponseByIdView, CheckSubscriptionView, CreateCheckoutSessionView,
     ForgotPasswordView, ResetPasswordView, ChangePasswordView
 )
@@ -28,7 +28,6 @@ urlpatterns = [
     path("password/change/", ChangePasswordView.as_view(), name="change_password"),
 
     # Employee Management
-    path("company/add-employee/", AddEmployeeView.as_view(), name="add_employee"),
     path("company/invite-employee/", InviteEmployeeView.as_view(), name="invite_employee"),
     path("employee/complete-registration/", CompleteEmployeeRegistrationView.as_view(), name="complete_employee_registration"),
 
