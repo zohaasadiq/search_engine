@@ -75,8 +75,6 @@ class Employee(models.Model):
     last_name = models.CharField(max_length=100)
     phone_number = models.CharField(max_length=15)
     date_of_birth = models.DateField()
-    joining_date = models.DateField()
-    end_of_contract_date = models.DateField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} - {self.company.name}"

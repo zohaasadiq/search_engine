@@ -40,8 +40,6 @@ class AddEmployeeSerializer(serializers.Serializer):
     last_name = serializers.CharField()
     phone_number = serializers.CharField()
     date_of_birth = serializers.DateField()
-    joining_date = serializers.DateField()
-    end_of_contract_date = serializers.DateField(required=False, allow_null=True)
 
 
 class QuerySerializer(serializers.ModelSerializer):
@@ -86,7 +84,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Employee
-        fields = ('user', 'company_name', 'first_name', 'last_name', 'phone_number', 'date_of_birth', 'joining_date', 'end_of_contract_date')
+        fields = ('user', 'company_name', 'first_name', 'last_name', 'phone_number', 'date_of_birth')
 
 class ForgotPasswordSerializer(serializers.Serializer):
     """Serializer for forgot password - collecting email"""
@@ -131,4 +129,4 @@ class EmployeeListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
         fields = ('user_id', 'email', 'first_name', 'last_name', 'phone_number', 
-                  'date_of_birth', 'joining_date', 'end_of_contract_date', 'is_active')
+                 'date_of_birth', 'is_active')

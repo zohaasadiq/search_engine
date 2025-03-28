@@ -92,6 +92,9 @@ class LoginView(APIView):
                     except Employee.DoesNotExist:
                         user_data["profile"] = None
             
+            # Include session ID in response so frontend can store it
+            user_data["session_id"] = request.session.session_key
+            
             return Response(user_data, status=status.HTTP_200_OK)
         except AuthenticationFailed as e:
             return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
@@ -252,12 +255,17 @@ class CompleteIndividualRegistrationView(APIView):
             user = authenticate(request, email=email, password=data["password"])
             if user:
                 login(request, user)
+                # Ensure the session is saved before accessing the session key
+                request.session.save()
             
             # Return user data
             user_data = {
                 "user": CustomUserSerializer(custom_user).data,
                 "profile": IndividualUserSerializer(individual).data
             }
+            
+            # Include session ID in response so frontend can store it
+            user_data["session_id"] = request.session.session_key
             
             return Response(user_data, status=status.HTTP_201_CREATED)
         except Exception as e:
@@ -402,12 +410,17 @@ class CompleteCompanyRegistrationView(APIView):
             user = authenticate(request, email=email, password=data["password"])
             if user:
                 login(request, user)
-                
+                # Ensure the session is saved before accessing the session key
+                request.session.save()
+            
             # Return company data
             company_data = {
                 "user": CustomUserSerializer(custom_user).data,
                 "profile": CompanySerializer(company).data
             }
+            
+            # Include session ID in response so frontend can store it
+            company_data["session_id"] = request.session.session_key
             
             return Response(company_data, status=status.HTTP_201_CREATED)
         except Exception as e:
@@ -479,8 +492,6 @@ class AddEmployeeView(APIView):
                 last_name=data["last_name"],
                 phone_number=data["phone_number"],
                 date_of_birth=data["date_of_birth"],
-                joining_date=data["joining_date"],
-                end_of_contract_date=data.get("end_of_contract_date"),
             )
 
             # Send login credentials to the employee's email
@@ -953,27 +964,27 @@ class CompleteEmployeeRegistrationView(APIView):
             except Company.DoesNotExist:
                 return Response({"error": "Company not found"}, status=status.HTTP_404_NOT_FOUND)
             
-            # Create user account
-            custom_user = CustomUser.objects.create_user(
-                email=email,
-                password=data["password"],
-                is_company=False,
-            )
-            
-            # Create employee record with today's date as joining_date
-            from django.utils import timezone
-            current_date = timezone.now().date()
-            
-            employee = Employee.objects.create(
-                user=custom_user,
-                company=company,
-                first_name=data["first_name"],
-                last_name=data["last_name"],
-                phone_number=data["phone_number"],
-                date_of_birth=data["date_of_birth"],
-                joining_date=current_date,  # Set to current date instead of None
-                end_of_contract_date=None,  # This field is nullable
-            )
+            # Use transaction to ensure all database operations succeed or fail together
+            with transaction.atomic():
+                # Create user account
+                custom_user = CustomUser.objects.create_user(
+                    email=email,
+                    password=data["password"],
+                    is_company=False,
+                )
+                
+                # Create employee record with today's date as joining_date
+                from django.utils import timezone
+                current_date = timezone.now().date()
+                
+                employee = Employee.objects.create(
+                    user=custom_user,
+                    company=company,
+                    first_name=data["first_name"],
+                    last_name=data["last_name"],
+                    phone_number=data["phone_number"],
+                    date_of_birth=data["date_of_birth"],
+                )
             
             # Clean up Redis
             redis_client.delete(f"invite:{invite_token}")
@@ -982,12 +993,17 @@ class CompleteEmployeeRegistrationView(APIView):
             user = authenticate(request, email=email, password=data["password"])
             if user:
                 login(request, user)
+                # Ensure the session is saved before accessing the session key
+                request.session.save()
             
             # Return employee data
             employee_data = {
                 "message": "Registration completed successfully",
                 "employee": EmployeeSerializer(employee).data
             }
+            
+            # Include session ID in response so frontend can store it
+            employee_data["session_id"] = request.session.session_key
             
             return Response(employee_data, status=status.HTTP_201_CREATED)
         except Exception as e:
