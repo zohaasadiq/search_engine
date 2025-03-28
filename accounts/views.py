@@ -1,17 +1,18 @@
-from django.contrib.auth import get_user_model, authenticate, login, logout
+from django.contrib.auth import get_user_model, authenticate, login, logout, update_session_auth_hash
 from django.core.mail import send_mail
 from django.utils.crypto import get_random_string
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError, AuthenticationFailed
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 import redis
 import stripe
 import os
+import json
 from dotenv import load_dotenv
 from django.contrib.auth import get_user_model
 
@@ -20,10 +21,13 @@ from drf_yasg import openapi
 
 from .models import IndividualUser, Company, Employee, Query, CustomUser, SubscriptionPlan
 from .serializers import (
-    IndividualSignupSerializer,
-    VerifyIndividualOTPSerializer,
-    CompanySignupSerializer,
+    EmailOnlySerializer, 
+    VerifyOTPSerializer,
+    IndividualSignupDataSerializer,
+    CompanySignupDataSerializer,
     AddEmployeeSerializer, LoginSerializer,
+    CustomUserSerializer, IndividualUserSerializer, CompanySerializer, EmployeeSerializer,
+    ForgotPasswordSerializer, ResetPasswordSerializer, ChangePasswordSerializer
 )
 
 load_dotenv()
@@ -34,30 +38,64 @@ User = get_user_model()
 
 CustomUser = get_user_model()
 
+class CsrfExemptSessionAuthentication(SessionAuthentication):
+    def enforce_csrf(self, request):
+        return
+
+@method_decorator(csrf_exempt, name='dispatch')
 class LoginView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.AllowAny]
 
     @swagger_auto_schema(
         request_body=LoginSerializer,
         responses={
-            200: openapi.Response("Login successful"),
-            400: "Invalid credentials"
+            200: openapi.Response("Login successful with user data"),
+            400: "Invalid credentials",
+            401: "Authentication failed"
         }
     )
     def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"]
-        password = serializer.validated_data["password"]
+        try:
+            serializer = LoginSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            email = serializer.validated_data["email"]
+            password = serializer.validated_data["password"]
 
-        user = authenticate(request, email=email, password=password)
-        if user is not None:
+            user = authenticate(request, email=email, password=password)
+            if user is None:
+                raise AuthenticationFailed("Invalid email or password")
+                
             login(request, user)
-            return Response({"message": "Login successful"}, status=status.HTTP_200_OK)
-        else:
-            return Response({"error": "Invalid email or password"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get user specific data based on user type
+            user_data = {"user": CustomUserSerializer(user).data}
+            
+            if user.is_company:
+                company = Company.objects.get(user=user)
+                user_data["profile"] = CompanySerializer(company).data
+            else:
+                try:
+                    individual = IndividualUser.objects.get(user=user)
+                    user_data["profile"] = IndividualUserSerializer(individual).data
+                except IndividualUser.DoesNotExist:
+                    try:
+                        employee = Employee.objects.get(user=user)
+                        user_data["profile"] = EmployeeSerializer(employee).data
+                    except Employee.DoesNotExist:
+                        user_data["profile"] = None
+            
+            return Response(user_data, status=status.HTTP_200_OK)
+        except AuthenticationFailed as e:
+            return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+        except Exception as e:
+            return Response({"error": "Login failed", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class LogoutView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
@@ -68,186 +106,392 @@ class LogoutView(APIView):
     def post(self, request):
         logout(request)
         return Response({"message": "Logout successful"}, status=status.HTTP_200_OK)
+
 # ---- Individual Signup (OTP Sending) ----
+@method_decorator(csrf_exempt, name='dispatch')
 class IndividualSignupView(APIView):
     """
     Individual user signup: Sends OTP to email.
     """
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.AllowAny]  # Allow anyone to call this endpoint
 
 
     @swagger_auto_schema(
-        request_body=IndividualSignupSerializer,
+        request_body=EmailOnlySerializer,
         responses={
             200: openapi.Response("OTP sent to email"),
             400: "Email already exists or invalid input"
         }
     )
     def post(self, request):
-        serializer = IndividualSignupSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"]
+        try:
+            serializer = EmailOnlySerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            email = serializer.validated_data["email"]
 
-        # Check if an IndividualUser already exists for this email
-        if IndividualUser.objects.filter(user__email=email).exists():
-            return Response({"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+            # Check if an IndividualUser already exists for this email
+            if CustomUser.objects.filter(email=email).exists():
+                return Response({"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
 
-        otp = get_random_string(length=6, allowed_chars="0123456789")
-        redis_client.setex(email, 300, otp)  # OTP valid for 5 minutes
+            otp = get_random_string(length=6, allowed_chars="0123456789")
+            redis_client.setex(f"otp:{email}", 300, otp)  # OTP valid for 5 minutes
 
-        send_mail(
-            "Your OTP Code",
-            f"Your OTP code is {otp}",
-            "noreply@example.com",
-            [email],
-            fail_silently=False,
-        )
-        return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+            send_mail(
+                "Your OTP Code",
+                f"Your OTP code is {otp}",
+                "noreply@example.com",
+                [email],
+                fail_silently=False,
+            )
+            return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Failed to send OTP", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# ---- Verify OTP and Create Individual User ----
+# ---- Verify OTP for Individual User ----
+@method_decorator(csrf_exempt, name='dispatch')
 class VerifyIndividualOTPView(APIView):
     """
-    Verifies OTP and creates an individual user.
+    Verify OTP for individual user registration.
     """
-    permission_classes = [permissions.AllowAny]  # Allow anyone to call this endpoint
-
-    @swagger_auto_schema(
-        request_body=VerifyIndividualOTPSerializer,
-        responses={
-            201: openapi.Response("Signup successful"),
-            400: "Invalid OTP or invalid input"
-        }
-    )
-    def post(self, request):
-        serializer = VerifyIndividualOTPSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-
-        stored_otp = redis_client.get(data["email"])
-        if not stored_otp or stored_otp != data["otp"]:
-            return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Create CustomUser first
-        custom_user = CustomUser.objects.create_user(
-            email=data["email"],
-            password=data["password"],
-            is_company=False,
-        )
-        # Create IndividualUser record
-        individual = IndividualUser.objects.create(
-            user=custom_user,
-            first_name=data["first_name"],
-            last_name=data["last_name"],
-            phone_number=data["phone_number"],
-            date_of_birth=data["date_of_birth"],
-            terms_and_conditions=data["terms_and_conditions"],
-        )
-        return Response({"message": "Signup successful"}, status=status.HTTP_201_CREATED)
-
-
-# ---- Company Signup ----
-class CompanySignupView(APIView):
-    """
-    Company signup without OTP verification.
-    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.AllowAny]
 
     @swagger_auto_schema(
-        request_body=CompanySignupSerializer,
+        request_body=VerifyOTPSerializer,
         responses={
-            201: openapi.Response("Company registered successfully"),
-            400: "Company email already exists or invalid input"
+            200: openapi.Response("OTP verified, proceed with registration"),
+            400: "Invalid OTP"
         }
     )
     def post(self, request):
-        serializer = CompanySignupSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
+        try:
+            serializer = VerifyOTPSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            data = serializer.validated_data
+            email = data["email"]
+            otp = data["otp"]
 
-        if Company.objects.filter(user__email=data["email"]).exists():
-            return Response({"error": "Company email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+            stored_otp = redis_client.get(f"otp:{email}")
+            if not stored_otp or stored_otp != otp:
+                return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Save verification status in Redis
+            redis_client.setex(f"verified:{email}", 1800, "true")  # verification valid for 30 minutes
+            
+            return Response({"message": "OTP verified, proceed with registration"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "OTP verification failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Create CustomUser with is_company=True using the provided password
-        custom_user = CustomUser.objects.create_user(
-            email=data["email"],
-            password=data["password"],
-            is_company=True,
-        )
-        company = Company.objects.create(
-            user=custom_user,
-            name=data["name"],
-            website=data.get("website", ""),
-            phone_number=data["phone_number"],
-            terms_and_conditions=data["terms_and_conditions"],
-        )
-        return Response({"message": "Company registered successfully"}, status=status.HTTP_201_CREATED)
+
+# ---- Complete Registration for Individual User ----
+@method_decorator(csrf_exempt, name='dispatch')
+class CompleteIndividualRegistrationView(APIView):
+    """
+    Complete registration for individual users after OTP verification.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=IndividualSignupDataSerializer,
+        responses={
+            201: openapi.Response("Registration successful with user data"),
+            400: "Email not verified or invalid input",
+            500: "Internal server error"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = IndividualSignupDataSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            
+            data = serializer.validated_data
+            email = data["email"]
+            
+            # Check if email was verified
+            verified = redis_client.get(f"verified:{email}")
+            if not verified:
+                return Response({"error": "Email not verified"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Create CustomUser
+            custom_user = CustomUser.objects.create_user(
+                email=email,
+                password=data["password"],
+                is_company=False,
+            )
+            
+            # Create IndividualUser record
+            individual = IndividualUser.objects.create(
+                user=custom_user,
+                first_name=data["first_name"],
+                last_name=data["last_name"],
+                phone_number=data["phone_number"],
+                date_of_birth=data["date_of_birth"],
+                terms_and_conditions=data["terms_and_conditions"],
+            )
+            
+            # Clean up Redis
+            redis_client.delete(f"verified:{email}")
+            
+            # Automatically log the user in
+            user = authenticate(request, email=email, password=data["password"])
+            if user:
+                login(request, user)
+            
+            # Return user data
+            user_data = {
+                "user": CustomUserSerializer(custom_user).data,
+                "profile": IndividualUserSerializer(individual).data
+            }
+            
+            return Response(user_data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": "Registration failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---- Company Signup (OTP Sending) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class CompanySignupView(APIView):
+    """
+    Company signup: Sends OTP to email.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=EmailOnlySerializer,
+        responses={
+            200: openapi.Response("OTP sent to email"),
+            400: "Email already exists or invalid input"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = EmailOnlySerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            email = serializer.validated_data["email"]
+
+            # Check if a Company already exists for this email
+            if CustomUser.objects.filter(email=email).exists():
+                return Response({"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+            otp = get_random_string(length=6, allowed_chars="0123456789")
+            redis_client.setex(f"otp:{email}", 300, otp)  # OTP valid for 5 minutes
+
+            send_mail(
+                "Your Company Registration OTP",
+                f"Your OTP code for company registration is {otp}",
+                "noreply@example.com",
+                [email],
+                fail_silently=False,
+            )
+            return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Failed to send OTP", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---- Verify OTP for Company ----
+@method_decorator(csrf_exempt, name='dispatch')
+class VerifyCompanyOTPView(APIView):
+    """
+    Verify OTP for company registration.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=VerifyOTPSerializer,
+        responses={
+            200: openapi.Response("OTP verified, proceed with registration"),
+            400: "Invalid OTP"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = VerifyOTPSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            data = serializer.validated_data
+            email = data["email"]
+            otp = data["otp"]
+
+            stored_otp = redis_client.get(f"otp:{email}")
+            if not stored_otp or stored_otp != otp:
+                return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Save verification status in Redis
+            redis_client.setex(f"verified:{email}", 1800, "true")  # verification valid for 30 minutes
+            
+            return Response({"message": "OTP verified, proceed with registration"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "OTP verification failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---- Complete Registration for Company ----
+@method_decorator(csrf_exempt, name='dispatch')
+class CompleteCompanyRegistrationView(APIView):
+    """
+    Complete registration for companies after OTP verification.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=CompanySignupDataSerializer,
+        responses={
+            201: openapi.Response("Company registration successful with user data"),
+            400: "Email not verified or invalid input",
+            500: "Internal server error"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = CompanySignupDataSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            
+            data = serializer.validated_data
+            email = data["email"]
+            
+            # Check if email was verified
+            verified = redis_client.get(f"verified:{email}")
+            if not verified:
+                return Response({"error": "Email not verified"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Create CustomUser with is_company=True
+            custom_user = CustomUser.objects.create_user(
+                email=email,
+                password=data["password"],
+                is_company=True,
+            )
+            
+            # Create Company record
+            company = Company.objects.create(
+                user=custom_user,
+                name=data["name"],
+                website=data.get("website", ""),
+                phone_number=data["phone_number"],
+                terms_and_conditions=data["terms_and_conditions"],
+            )
+            
+            # Clean up Redis
+            redis_client.delete(f"verified:{email}")
+            
+            # Automatically log the user in
+            user = authenticate(request, email=email, password=data["password"])
+            if user:
+                login(request, user)
+                
+            # Return company data
+            company_data = {
+                "user": CustomUserSerializer(custom_user).data,
+                "profile": CompanySerializer(company).data
+            }
+            
+            return Response(company_data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": "Company registration failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ---- Add Employee (by Company) ----
+@method_decorator(csrf_exempt, name='dispatch')
 class AddEmployeeView(APIView):
     """
     Companies can add employees under their account.
     """
-    permission_classes = [permissions.AllowAny]  # Allow anyone to call this endpoint
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]  # User must be authenticated
 
     @swagger_auto_schema(
         request_body=AddEmployeeSerializer,
         responses={
-            201: openapi.Response("Employee added successfully"),
-            400: "Employee limit reached, email already exists, or invalid input"
+            201: openapi.Response("Employee added successfully with employee data"),
+            400: "Employee limit reached, email already exists, or invalid input",
+            401: "Authentication required",
+            403: "Not authorized (not a company account)",
+            500: "Internal server error"
         }
     )
     def post(self, request):
-        serializer = AddEmployeeSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        user = request.user
+        try:
+            serializer = AddEmployeeSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            data = serializer.validated_data
+            user = request.user
+            
+            if not user.is_company:
+                return Response({"error": "Only company accounts can add employees"}, status=status.HTTP_403_FORBIDDEN)
 
-        company = get_object_or_404(Company, user__email=user)
-        if company.employee_count() >= company.employee_limit:
-            return Response({"error": f"Employee limit reached ({company.employee_limit})"},
-                            status=status.HTTP_400_BAD_REQUEST)
+            try:
+                company = Company.objects.get(user=user)
+            except Company.DoesNotExist:
+                return Response({"error": "Company profile not found"}, status=status.HTTP_404_NOT_FOUND)
+                
+            if company.employee_count() >= company.employee_limit:
+                return Response({"error": f"Employee limit reached ({company.employee_limit})"}, 
+                                status=status.HTTP_400_BAD_REQUEST)
 
-        # Generate a random password for the employee
-        random_password = get_random_string(
-            length=10,
-            allowed_chars="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        )
+            # Check if email already exists
+            if CustomUser.objects.filter(email=data["email"]).exists():
+                return Response({"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+                                
+            # Generate a random password for the employee
+            random_password = get_random_string(
+                length=10,
+                allowed_chars="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            )
 
-        # Create CustomUser for the employee
-        custom_user = CustomUser.objects.create_user(
-            email=data["email"],
-            password=random_password,
-            is_company=False,
-        )
+            # Create CustomUser for the employee
+            custom_user = CustomUser.objects.create_user(
+                email=data["email"],
+                password=random_password,
+                is_company=False,
+            )
 
-        # Create Employee record with additional fields
-        employee = Employee.objects.create(
-            user=custom_user,
-            company=company,
-            first_name=data["first_name"],
-            last_name=data["last_name"],
-            phone_number=data["phone_number"],
-            date_of_birth=data["date_of_birth"],
-            joining_date=data["joining_date"],
-            end_of_contract_date=data.get("end_of_contract_date"),
-        )
+            # Create Employee record with additional fields
+            employee = Employee.objects.create(
+                user=custom_user,
+                company=company,
+                first_name=data["first_name"],
+                last_name=data["last_name"],
+                phone_number=data["phone_number"],
+                date_of_birth=data["date_of_birth"],
+                joining_date=data["joining_date"],
+                end_of_contract_date=data.get("end_of_contract_date"),
+            )
 
-        # Send login credentials to the employee's email
-        send_mail(
-            "Your Employee Account Details",
-            f"Hello {data['first_name']},\n\nYour account has been created.\nEmail: {data['email']}\nPassword: {random_password}\n\nPlease change your password after logging in.",
-            "noreply@example.com",
-            [data["email"]],
-            fail_silently=False,
-        )
+            # Send login credentials to the employee's email
+            send_mail(
+                "Your Employee Account Details",
+                f"Hello {data['first_name']},\n\nYour account has been created.\nEmail: {data['email']}\nPassword: {random_password}\n\nPlease change your password after logging in.",
+                "noreply@example.com",
+                [data["email"]],
+                fail_silently=False,
+            )
 
-        return Response({"message": "Employee added successfully"}, status=status.HTTP_201_CREATED)
+            # Return employee data
+            employee_data = {
+                "message": "Employee added successfully",
+                "employee": EmployeeSerializer(employee).data,
+                "password_sent": True
+            }
 
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        return
+            return Response(employee_data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": "Failed to add employee", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 @method_decorator(csrf_exempt, name='dispatch')
 class SaveQueryView(APIView):
     authentication_classes = [CsrfExemptSessionAuthentication]
@@ -303,7 +547,9 @@ class SaveQueryView(APIView):
             status=status.HTTP_201_CREATED
         )
 
+@method_decorator(csrf_exempt, name='dispatch')
 class GetQueriesByUserView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -324,7 +570,9 @@ class GetQueriesByUserView(APIView):
         return Response({"queries": query_list}, status=status.HTTP_200_OK)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class GetQueryResponseByIdView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request, query_id):
         try:
@@ -339,7 +587,10 @@ class GetQueryResponseByIdView(APIView):
             "references": query.references
         }
         return Response(query_response, status=status.HTTP_200_OK)
+
+@method_decorator(csrf_exempt, name='dispatch')
 class CreateCheckoutSessionView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.AllowAny]
 
     @swagger_auto_schema(
@@ -404,7 +655,9 @@ class CreateCheckoutSessionView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class CheckSubscriptionView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [permissions.AllowAny]
     def get(self, request):
         user = request.user
@@ -413,4 +666,143 @@ class CheckSubscriptionView(APIView):
         except CustomUser.DoesNotExist:
             raise NotFound(f"User {user} not found.")
         return Response({"active": user.is_active}, status=status.HTTP_200_OK)
+
+# ---- Forgot Password (Send OTP) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class ForgotPasswordView(APIView):
+    """
+    Send OTP for password reset if email exists.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=ForgotPasswordSerializer,
+        responses={
+            200: openapi.Response("OTP sent to email"),
+            404: "Email not registered"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = ForgotPasswordSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            email = serializer.validated_data["email"]
+
+            # Check if user exists
+            try:
+                user = CustomUser.objects.get(email=email)
+            except CustomUser.DoesNotExist:
+                return Response({"error": "Email not registered"}, status=status.HTTP_404_NOT_FOUND)
+
+            # Generate and send OTP
+            otp = get_random_string(length=6, allowed_chars="0123456789")
+            redis_client.setex(f"reset_otp:{email}", 300, otp)  # OTP valid for 5 minutes
+
+            send_mail(
+                "Password Reset OTP",
+                f"Your OTP code for password reset is {otp}",
+                "noreply@example.com",
+                [email],
+                fail_silently=False,
+            )
+            return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Failed to send OTP", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---- Reset Password (Verify OTP and Set New Password) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class ResetPasswordView(APIView):
+    """
+    Verify OTP and set new password.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=ResetPasswordSerializer,
+        responses={
+            200: openapi.Response("Password reset successful"),
+            400: "Invalid OTP or invalid input",
+            404: "Email not registered"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = ResetPasswordSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            data = serializer.validated_data
+            email = data["email"]
+            otp = data["otp"]
+            new_password = data["new_password"]
+
+            # Check if user exists
+            try:
+                user = CustomUser.objects.get(email=email)
+            except CustomUser.DoesNotExist:
+                return Response({"error": "Email not registered"}, status=status.HTTP_404_NOT_FOUND)
+
+            # Verify OTP
+            stored_otp = redis_client.get(f"reset_otp:{email}")
+            if not stored_otp or stored_otp != otp:
+                return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Set new password
+            user.set_password(new_password)
+            user.save()
+            
+            # Clean up Redis
+            redis_client.delete(f"reset_otp:{email}")
+            
+            return Response({"message": "Password reset successful"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Password reset failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---- Change Password (Logged In User) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class ChangePasswordView(APIView):
+    """
+    Change password for authenticated user.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        request_body=ChangePasswordSerializer,
+        responses={
+            200: openapi.Response("Password changed successfully"),
+            400: "Invalid old password or invalid input"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = ChangePasswordSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            data = serializer.validated_data
+            old_password = data["old_password"]
+            new_password = data["new_password"]
+
+            # Check if old password is correct
+            user = request.user
+            if not user.check_password(old_password):
+                return Response({"error": "Current password is incorrect"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Set new password
+            user.set_password(new_password)
+            user.save()
+            
+            # Update session auth hash to prevent logout
+            update_session_auth_hash(request, user)
+            
+            return Response({"message": "Password changed successfully"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Password change failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

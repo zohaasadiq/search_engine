@@ -1,19 +1,21 @@
 from rest_framework import serializers
-from .models import IndividualUser, Company, Employee, Query
+from .models import IndividualUser, Company, Employee, Query, CustomUser
 
 
-class IndividualSignupSerializer(serializers.Serializer):
+class EmailOnlySerializer(serializers.Serializer):
+    """Serializer for collecting just an email address"""
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True)
-    first_name = serializers.CharField()
-    last_name = serializers.CharField()
-    phone_number = serializers.CharField()
-    date_of_birth = serializers.DateField()
-    terms_and_conditions = serializers.BooleanField()
 
-class VerifyIndividualOTPSerializer(serializers.Serializer):
+
+class VerifyOTPSerializer(serializers.Serializer):
+    """Serializer for OTP verification only"""
     email = serializers.EmailField()
     otp = serializers.CharField(max_length=6)
+
+
+class IndividualSignupDataSerializer(serializers.Serializer):
+    """Serializer for individual user registration data"""
+    email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
     first_name = serializers.CharField()
     last_name = serializers.CharField()
@@ -22,7 +24,8 @@ class VerifyIndividualOTPSerializer(serializers.Serializer):
     terms_and_conditions = serializers.BooleanField()
 
 
-class CompanySignupSerializer(serializers.Serializer):
+class CompanySignupDataSerializer(serializers.Serializer):
+    """Serializer for company registration data"""
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
     name = serializers.CharField()
@@ -52,8 +55,52 @@ class QuerySerializer(serializers.ModelSerializer):
         model = Query
         fields = ("query", "response")
 
-from rest_framework import serializers
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+
+# Response serializers for returning user data
+class CustomUserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ('email', 'is_company', 'is_active')
+
+class IndividualUserSerializer(serializers.ModelSerializer):
+    user = CustomUserSerializer()
+    
+    class Meta:
+        model = IndividualUser
+        fields = ('user', 'first_name', 'last_name', 'phone_number', 'date_of_birth', 'date_joined')
+
+class CompanySerializer(serializers.ModelSerializer):
+    user = CustomUserSerializer()
+    
+    class Meta:
+        model = Company
+        fields = ('user', 'name', 'website', 'phone_number', 'employee_limit')
+
+class EmployeeSerializer(serializers.ModelSerializer):
+    user = CustomUserSerializer()
+    company_name = serializers.CharField(source='company.name')
+    
+    class Meta:
+        model = Employee
+        fields = ('user', 'company_name', 'first_name', 'last_name', 'phone_number', 'date_of_birth', 'joining_date', 'end_of_contract_date')
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    """Serializer for forgot password - collecting email"""
+    email = serializers.EmailField()
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    """Serializer for resetting password with OTP"""
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+    new_password = serializers.CharField(write_only=True)
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """Serializer for changing password when logged in"""
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True)

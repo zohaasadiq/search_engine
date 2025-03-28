@@ -4,3 +4,4 @@ Markdown==3.7
 django-filter==25.1
 psycopg2-binary==2.9.10
 stripe==11.6.0
+django-cors-headers==4.3.1
