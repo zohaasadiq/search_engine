@@ -27,9 +27,9 @@ SECRET_KEY = 'django-insecure-luq9&--)9k(i(yj6vr#k@yaez6o51%7*61^(6ose+^9a(&0o%o
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -163,3 +163,21 @@ CORS_ALLOW_HEADERS = [
 # ]
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST="smtp.gmail.com"
+EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_HOST_USER="xearxhinjin@gmail.com"
+EMAIL_HOST_PASSWORD="qzkv dbdt ttxg fdsh"
+DEFAULT_FROM_EMAIL="xearxhinjin@gmail.com"
+DEFAULT_TO_EMAIL="xearxhinjin@gmail.com"
+# EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"
+# EMAIL_HOST="smtp.gmail.com"
+# EMAIL_PORT=587
+# EMAIL_USE_TLS=True
+# EMAIL_HOST_USER="whatsapp.assistant.edu@gmail.com"
+# EMAIL_HOST_PASSWORD="hzqalfbhxguqocih"
+# DEFAULT_FROM_EMAIL="whatsapp.assistant.edu@gmail.com"
+# DEFAULT_TO_EMAIL="serviceemailsending70@gmail.com"
+
+

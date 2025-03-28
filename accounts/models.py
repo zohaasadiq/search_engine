@@ -83,11 +83,10 @@ class Employee(models.Model):
 class Query(models.Model):
     query_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
-
     query = models.TextField()
     response_text = models.TextField()
     summary = models.TextField(null=True, blank=True)
-    main_sources = models.JSONField(null=True, blank=True)
+    corrected_query = models.TextField(null=True, blank=True)
     references = models.JSONField(null=True, blank=True)
     timestamp = models.DateTimeField(auto_now_add=True)
     def __str__(self):

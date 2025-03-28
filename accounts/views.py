@@ -1,3 +1,4 @@
+from django.contrib.admin.checks import refer_to_missing_field
 from django.contrib.auth import get_user_model, authenticate, login, logout, update_session_auth_hash
 from django.core.mail import send_mail
 from django.utils.crypto import get_random_string
@@ -19,6 +20,8 @@ from uuid import uuid4
 from django.urls import reverse
 from django.db import transaction
 from django.http import Http404
+from django.template.loader import render_to_string
+from django.conf import settings
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -148,10 +151,10 @@ class IndividualSignupView(APIView):
             redis_client.setex(f"otp:{email}", 300, otp)  # OTP valid for 5 minutes
 
             send_mail(
-                "Your OTP Code",
-                f"Your OTP code is {otp}",
-                "noreply@example.com",
-                [email],
+                subject="Your OTP Code",
+                message=f"Your OTP code is {otp}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
                 fail_silently=False,
             )
             return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
@@ -304,10 +307,10 @@ class CompanySignupView(APIView):
             redis_client.setex(f"otp:{email}", 300, otp)  # OTP valid for 5 minutes
 
             send_mail(
-                "Your Company Registration OTP",
-                f"Your OTP code for company registration is {otp}",
-                "noreply@example.com",
-                [email],
+                subject="Your Company Registration OTP",
+                message=f"Your OTP code for company registration is {otp}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
                 fail_silently=False,
             )
             return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
@@ -496,10 +499,10 @@ class AddEmployeeView(APIView):
 
             # Send login credentials to the employee's email
             send_mail(
-                "Your Employee Account Details",
-                f"Hello {data['first_name']},\n\nYour account has been created.\nEmail: {data['email']}\nPassword: {random_password}\n\nPlease change your password after logging in.",
-                "noreply@example.com",
-                [data["email"]],
+                subject="Your Employee Account Details",
+                message=f"Hello {data['first_name']},\n\nYour account has been created.\nEmail: {data['email']}\nPassword: {random_password}\n\nPlease change your password after logging in.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[data["email"]],
                 fail_silently=False,
             )
 
@@ -524,17 +527,14 @@ class SaveQueryView(APIView):
             type=openapi.TYPE_OBJECT,
             properties={
                 "query": openapi.Schema(type=openapi.TYPE_STRING),
-                "result": openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        "summary": openapi.Schema(type=openapi.TYPE_STRING),
-                        "main_sources": openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_OBJECT)),
-                        "references": openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_OBJECT)),
-                    },
-                    required=["summary"]
-                )
+                "corrected_query": openapi.Schema(type=openapi.TYPE_STRING),
+                "summary": openapi.Schema(type=openapi.TYPE_STRING),
+                "references": openapi.Schema(
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(type=openapi.TYPE_OBJECT)
+                ),
             },
-            required=["query", "result"]
+            required=["query", "summary"]
         ),
         responses={
             201: openapi.Response("Query saved"),
@@ -542,26 +542,32 @@ class SaveQueryView(APIView):
         }
     )
     def post(self, request):
+
         print(request.user)
         data = request.data
-        query_text = data.get("query")
-        result = data.get("result", {})
-        response_text = result.get("summary", "")
-        summary = result.get("summary", "")
-        main_sources = result.get("main_sources", [])
-        references = result.get("references", [])
 
-        if not query_text or not response_text:
-            return Response({"error": "Query and result summary are required."}, status=status.HTTP_400_BAD_REQUEST)
+        query_text = data.get("query")
+
+        corrected_query = data.get("corrected_query", "")
+
+        summary = data.get("summary", "")
+
+        references = data.get("references", [])
+
+
+        if not query_text or not data:
+            return Response({"error": "Query and results are required."}, status=status.HTTP_400_BAD_REQUEST)
 
         user_instance = CustomUser.objects.get(pk=request.user.pk)
+
+
         query = Query.objects.create(
             user=user_instance,
-            query=query_text,
-            response_text=response_text,
-            summary=summary,
-            main_sources=main_sources,
-            references=references
+            query= query_text,
+            response_text= data,
+            summary= summary,
+            corrected_query= corrected_query,
+            references= references
         )
 
         return Response(
@@ -603,9 +609,8 @@ class GetQueryResponseByIdView(APIView):
             raise NotFound(f"Query with id {query_id} not found.")
         query_response = {
             "query_id": query.query_id,
-
+            "corrected_query" : query.corrected_query,
             "summary": query.summary,
-            "main_sources": query.main_sources,
             "references": query.references
         }
         return Response(query_response, status=status.HTTP_200_OK)
@@ -721,13 +726,13 @@ class ForgotPasswordView(APIView):
 
             # Generate and send OTP
             otp = get_random_string(length=6, allowed_chars="0123456789")
-            redis_client.setex(f"reset_otp:{email}", 300, otp)  # OTP valid for 5 minutes
+            redis_client.setex(f"reset_otp:{email}", 300, otp)
 
             send_mail(
-                "Password Reset OTP",
-                f"Your OTP code for password reset is {otp}",
-                "noreply@example.com",
-                [email],
+                subject="Password Reset OTP",
+                message=f"Your OTP code for password reset is {otp}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
                 fail_silently=False,
             )
             return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
@@ -897,13 +902,13 @@ class InviteEmployeeView(APIView):
             
             # Send invitation email
             send_mail(
-                f"Invitation to join {company.name}",
-                f"Hello,\n\nYou have been invited to join {company.name} as an employee. "
+                subject=f"Invitation to join {company.name}",
+                message=f"Hello,\n\nYou have been invited to join {company.name} as an employee. "
                 f"Please click the following link to complete your registration:\n\n"
                 f"{invite_url}\n\n"
                 f"This invitation will expire in 7 days.",
-                "noreply@example.com",
-                [email],
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
                 fail_silently=False,
             )
 
