@@ -104,3 +104,19 @@ class ChangePasswordSerializer(serializers.Serializer):
     """Serializer for changing password when logged in"""
     old_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True)
+
+
+class EmployeeInviteSerializer(serializers.Serializer):
+    """Serializer for inviting an employee"""
+    email = serializers.EmailField()
+
+
+class CompleteEmployeeRegistrationSerializer(serializers.Serializer):
+    """Serializer for employee completing their registration"""
+    invite_token = serializers.CharField()
+    password = serializers.CharField(write_only=True)
+    first_name = serializers.CharField()
+    last_name = serializers.CharField()
+    phone_number = serializers.CharField()
+    date_of_birth = serializers.DateField()
+    terms_and_conditions = serializers.BooleanField()

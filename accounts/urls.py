@@ -2,7 +2,8 @@ from django.urls import path
 from .views import (
     IndividualSignupView, VerifyIndividualOTPView, CompleteIndividualRegistrationView,
     CompanySignupView, VerifyCompanyOTPView, CompleteCompanyRegistrationView,
-    AddEmployeeView, SaveQueryView, LoginView, LogoutView, GetQueriesByUserView, GetQueryResponseByIdView, CheckSubscriptionView, CreateCheckoutSessionView,
+    AddEmployeeView, InviteEmployeeView, CompleteEmployeeRegistrationView,
+    SaveQueryView, LoginView, LogoutView, GetQueriesByUserView, GetQueryResponseByIdView, CheckSubscriptionView, CreateCheckoutSessionView,
     ForgotPasswordView, ResetPasswordView, ChangePasswordView
 )
 
@@ -26,11 +27,17 @@ urlpatterns = [
     path("password/reset/", ResetPasswordView.as_view(), name="reset_password"),
     path("password/change/", ChangePasswordView.as_view(), name="change_password"),
 
-    # Employees
+    # Employee Management
     path("company/add-employee/", AddEmployeeView.as_view(), name="add_employee"),
+    path("company/invite-employee/", InviteEmployeeView.as_view(), name="invite_employee"),
+    path("employee/complete-registration/", CompleteEmployeeRegistrationView.as_view(), name="complete_employee_registration"),
+
+    # Query Management
     path("save-query/", SaveQueryView.as_view(), name="save_query"),
     path('users/queries/', GetQueriesByUserView.as_view(), name="get_queries_by_user"),
     path('queries/<uuid:query_id>/response/', GetQueryResponseByIdView.as_view(), name="get_query_response_by_id"),
+
+    # Subscription Management
     path('check-subscription/', CheckSubscriptionView.as_view(), name="check_subscription"),
     path('create-checkout-session', CreateCheckoutSessionView.as_view(), name="create_checkout_session"),
 ]

@@ -15,6 +15,8 @@ import os
 import json
 from dotenv import load_dotenv
 from django.contrib.auth import get_user_model
+from uuid import uuid4
+from django.urls import reverse
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -27,7 +29,8 @@ from .serializers import (
     CompanySignupDataSerializer,
     AddEmployeeSerializer, LoginSerializer,
     CustomUserSerializer, IndividualUserSerializer, CompanySerializer, EmployeeSerializer,
-    ForgotPasswordSerializer, ResetPasswordSerializer, ChangePasswordSerializer
+    ForgotPasswordSerializer, ResetPasswordSerializer, ChangePasswordSerializer,
+    EmployeeInviteSerializer, CompleteEmployeeRegistrationSerializer
 )
 
 load_dotenv()
@@ -814,4 +817,162 @@ class ChangePasswordView(APIView):
             return Response({"message": "Password changed successfully"}, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": "Password change failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ---- Invite Employee (by Company) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class InviteEmployeeView(APIView):
+    """
+    Companies can invite employees who will complete their own registration.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]  # User must be authenticated
+
+    @swagger_auto_schema(
+        request_body=EmployeeInviteSerializer,
+        responses={
+            200: openapi.Response("Invitation sent to employee"),
+            400: "Employee limit reached, email already exists, or invalid input",
+            401: "Authentication required",
+            403: "Not authorized (not a company account)",
+            500: "Internal server error"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = EmployeeInviteSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            email = serializer.validated_data["email"]
+            user = request.user
+            
+            if not user.is_company:
+                return Response({"error": "Only company accounts can invite employees"}, status=status.HTTP_403_FORBIDDEN)
+
+            try:
+                company = Company.objects.get(user=user)
+            except Company.DoesNotExist:
+                return Response({"error": "Company profile not found"}, status=status.HTTP_404_NOT_FOUND)
+                
+            if company.employee_count() >= company.employee_limit:
+                return Response({"error": f"Employee limit reached ({company.employee_limit})"}, 
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            # Check if email already exists
+            if CustomUser.objects.filter(email=email).exists():
+                return Response({"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+                                
+            # Generate a unique token for this invitation
+            invite_token = str(uuid4())
+            
+            # Store invitation in Redis with 7-day expiry
+            invitation_data = {
+                "company_id": str(company.user_id),
+                "company_name": company.name,
+                "email": email
+            }
+            redis_client.setex(f"invite:{invite_token}", 604800, json.dumps(invitation_data))  # 7 days
+            
+            # Generate invitation URL
+            # In a real-world scenario, this would be a frontend URL
+            # But for this example, we'll just include the token
+            invite_url = f"/complete-employee-registration?token={invite_token}"
+            
+            # Send invitation email
+            send_mail(
+                f"Invitation to join {company.name}",
+                f"Hello,\n\nYou have been invited to join {company.name} as an employee. "
+                f"Please click the following link to complete your registration:\n\n"
+                f"{invite_url}\n\n"
+                f"This invitation will expire in 7 days.",
+                "noreply@example.com",
+                [email],
+                fail_silently=False,
+            )
+
+            return Response({
+                "message": "Invitation sent to employee",
+                "invite_token": invite_token
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Failed to invite employee", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ---- Complete Employee Registration ----
+@method_decorator(csrf_exempt, name='dispatch')
+class CompleteEmployeeRegistrationView(APIView):
+    """
+    Complete employee registration after receiving invitation.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]  # Allow anyone with an invitation token
+
+    @swagger_auto_schema(
+        request_body=CompleteEmployeeRegistrationSerializer,
+        responses={
+            201: openapi.Response("Registration completed successfully"),
+            400: "Invalid token or data",
+            404: "Invitation not found or expired",
+            500: "Internal server error"
+        }
+    )
+    def post(self, request):
+        try:
+            serializer = CompleteEmployeeRegistrationSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+                
+            data = serializer.validated_data
+            invite_token = data["invite_token"]
+            
+            # Retrieve invitation data
+            invitation_json = redis_client.get(f"invite:{invite_token}")
+            if not invitation_json:
+                return Response({"error": "Invitation not found or expired"}, status=status.HTTP_404_NOT_FOUND)
+            
+            invitation = json.loads(invitation_json)
+            email = invitation["email"]
+            company_id = invitation["company_id"]
+            
+            # Get company
+            try:
+                company = Company.objects.get(user_id=company_id)
+            except Company.DoesNotExist:
+                return Response({"error": "Company not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Create user account
+            custom_user = CustomUser.objects.create_user(
+                email=email,
+                password=data["password"],
+                is_company=False,
+            )
+            
+            # Create employee record
+            employee = Employee.objects.create(
+                user=custom_user,
+                company=company,
+                first_name=data["first_name"],
+                last_name=data["last_name"],
+                phone_number=data["phone_number"],
+                date_of_birth=data["date_of_birth"],
+                joining_date=None,  # Company can update later if needed
+                end_of_contract_date=None,  # Company can update later if needed
+            )
+            
+            # Clean up Redis
+            redis_client.delete(f"invite:{invite_token}")
+            
+            # Automatically log the user in
+            user = authenticate(request, email=email, password=data["password"])
+            if user:
+                login(request, user)
+            
+            # Return employee data
+            employee_data = {
+                "message": "Registration completed successfully",
+                "employee": EmployeeSerializer(employee).data
+            }
+            
+            return Response(employee_data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": "Registration failed", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
