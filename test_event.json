@@ -1,0 +1,22 @@
+{
+  "id": "evt_test_webhook_debug",
+  "object": "event",
+  "api_version": "2020-08-27",
+  "created": 1617984456,
+  "data": {
+    "object": {
+      "id": "cs_test_debug_session",
+      "object": "checkout.session",
+      "payment_status": "paid",
+      "customer": "cus_test_debug_customer",
+      "metadata": {
+        "user_id": "test_user_id",
+        "plan_id": "test_plan_id",
+        "is_test": "true"
+      },
+      "subscription": "sub_test_debug_123456"
+    }
+  },
+  "type": "checkout.session.completed",
+  "livemode": false
+}

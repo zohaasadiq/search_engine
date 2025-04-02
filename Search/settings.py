@@ -151,33 +151,46 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
-    'x-session-id',  # Custom header for session authentication
+    'x-session-id',
+    'referrer',
+    'referrer-policy',
 ]
 
-# If you want to restrict to specific origins instead of allowing all:
-# CORS_ALLOWED_ORIGINS = [
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-#     "http://localhost:5173",
-#     "http://127.0.0.1:5173",
-# ]
+# In case CORS_ALLOW_ALL_ORIGINS is disabled, explicitly allow ngrok domains
+CORS_ALLOWED_ORIGINS = [
+    "https://23ed-2404-3100-1c8d-b871-2831-b68c-8b48-6d41.ngrok-free.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# Set CORS_EXPOSE_HEADERS to allow frontend to access custom headers
+CORS_EXPOSE_HEADERS = [
+    'x-session-id',
+]
+
+# Add middleware to modify response headers if needed
+SECURE_REFERRER_POLICY = 'same-origin'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST="smtp.gmail.com"
-EMAIL_PORT=587
-EMAIL_USE_TLS=True
-EMAIL_HOST_USER="xearxhinjin@gmail.com"
-EMAIL_HOST_PASSWORD="qzkv dbdt ttxg fdsh"
-DEFAULT_FROM_EMAIL="xearxhinjin@gmail.com"
-DEFAULT_TO_EMAIL="xearxhinjin@gmail.com"
-# EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"
-# EMAIL_HOST="smtp.gmail.com"
-# EMAIL_PORT=587
-# EMAIL_USE_TLS=True
-# EMAIL_HOST_USER="whatsapp.assistant.edu@gmail.com"
-# EMAIL_HOST_PASSWORD="hzqalfbhxguqocih"
-# DEFAULT_FROM_EMAIL="whatsapp.assistant.edu@gmail.com"
-# DEFAULT_TO_EMAIL="serviceemailsending70@gmail.com"
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+# Fix for SSL certificate verification issues in development
+if os.getenv('PYTHON_SSL_CERT_VERIFY', 'True').lower() == 'false':
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+
+# Stripe Configuration
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', '')
+STRIPE_PUBLIC_KEY = os.getenv('STRIPE_PUBLIC_KEY', '')
+STRIPE_WEBHOOK_SECRET = 'whsec_xMUDO69Ei6W0Wdlvlh8u36RkVnjcjbVK'  # Stripe webhook signing secret
+
+# Frontend URL for redirect after payment
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')  # Change this to your actual frontend URL
 
 

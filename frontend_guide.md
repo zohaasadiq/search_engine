@@ -30,6 +30,51 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// Response interceptor to handle session expiration
+apiClient.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    
+    // If error is 401 (Unauthorized) and not from a login attempt or refresh attempt
+    if (error.response && error.response.status === 401 && 
+        !originalRequest._retry && 
+        !originalRequest.url.includes('/api/accounts/login/') &&
+        !originalRequest.url.includes('/api/accounts/refresh-session/')) {
+      
+      originalRequest._retry = true;
+      
+      try {
+        // Try refreshing the session
+        const response = await axios.post(`${API_BASE_URL}/api/accounts/refresh-session/`, {}, {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-Id': localStorage.getItem('sessionId')
+          }
+        });
+        
+        // Store new session ID
+        if (response.data.session_id) {
+          localStorage.setItem('sessionId', response.data.session_id);
+          
+          // Update header for the original request
+          originalRequest.headers['X-Session-Id'] = response.data.session_id;
+          
+          // Retry the original request
+          return apiClient(originalRequest);
+        }
+      } catch (refreshError) {
+        // If refresh fails, redirect to login
+        localStorage.removeItem('sessionId');
+        window.location.href = '/login';
+        return Promise.reject(refreshError);
+      }
+    }
+    
+    return Promise.reject(error);
+  }
+);
+
 // Login function that stores sessionId
 export const login = async (email, password) => {
   try {
@@ -55,6 +100,17 @@ export const logout = async () => {
   } catch (error) {
     console.error('Logout failed:', error);
     throw error;
+  }
+};
+
+// Check if session is valid
+export const checkSession = async () => {
+  try {
+    const response = await apiClient.get('/api/accounts/session/status/');
+    return response.data.is_authenticated;
+  } catch (error) {
+    console.error('Session check failed:', error);
+    return false;
   }
 };
 
@@ -180,4 +236,169 @@ function EmployeeList() {
 export default EmployeeList;
 ```
 
-This approach sends the session ID in a custom header instead of relying on cookies, which should solve your authentication issues. 
+## Authentication Context
+
+Create an Authentication Context to manage session state across your application:
+
+```jsx
+// src/context/AuthContext.js
+import React, { createContext, useState, useEffect, useContext } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { login as apiLogin, logout as apiLogout, checkSession } from '../api/apiClient';
+
+// Create context
+const AuthContext = createContext(null);
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+
+  // Check session status on mount
+  useEffect(() => {
+    const validateSession = async () => {
+      if (localStorage.getItem('sessionId')) {
+        try {
+          const isAuthenticated = await checkSession();
+          if (!isAuthenticated) {
+            // Clear stored data if session is invalid
+            localStorage.removeItem('sessionId');
+            setUser(null);
+          } else {
+            // Optionally fetch user data here
+            // const userData = await fetchUserData();
+            // setUser(userData);
+          }
+        } catch (err) {
+          console.error('Session validation error:', err);
+          localStorage.removeItem('sessionId');
+          setUser(null);
+        }
+      }
+      setLoading(false);
+    };
+
+    validateSession();
+  }, []);
+
+  // Login function
+  const login = async (email, password) => {
+    try {
+      const userData = await apiLogin(email, password);
+      setUser(userData.user);
+      return userData;
+    } catch (err) {
+      console.error('Login error:', err);
+      throw err;
+    }
+  };
+
+  // Logout function
+  const logout = async () => {
+    try {
+      await apiLogout();
+    } catch (err) {
+      console.error('Logout error:', err);
+    } finally {
+      localStorage.removeItem('sessionId');
+      setUser(null);
+      navigate('/login');
+    }
+  };
+
+  // Session status helpers
+  const isAuthenticated = !!localStorage.getItem('sessionId');
+
+  // Exposed context value
+  const value = {
+    user,
+    loading,
+    login,
+    logout,
+    isAuthenticated
+  };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+};
+
+// Custom hook to use the auth context
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+```
+
+## Protected Route Component
+
+Create a component to protect routes that require authentication:
+
+```jsx
+// src/components/ProtectedRoute.js
+import React from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+
+const ProtectedRoute = ({ children }) => {
+  const { isAuthenticated, loading } = useAuth();
+  const location = useLocation();
+
+  if (loading) {
+    return <div>Loading...</div>; // Or your loading component
+  }
+
+  if (!isAuthenticated) {
+    // Redirect to login with return path
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  return children;
+};
+
+export default ProtectedRoute;
+```
+
+## Using the Auth Context in App
+
+Wrap your application with the AuthProvider:
+
+```jsx
+// src/App.js
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
+import LoginPage from './pages/LoginPage';
+import Dashboard from './pages/Dashboard';
+
+function App() {
+  return (
+    <Router>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
+          {/* Other routes */}
+        </Routes>
+      </AuthProvider>
+    </Router>
+  );
+}
+
+export default App;
+```
+
+This approach provides a complete session management solution that:
+1. Automatically refreshes expired sessions
+2. Protects routes that require authentication
+3. Redirects to login when session is invalid
+4. Provides authentication state to all components 

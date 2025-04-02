@@ -4,9 +4,13 @@ from .views import (
     CompanySignupView, VerifyCompanyOTPView, CompleteCompanyRegistrationView,
     InviteEmployeeView, CompleteEmployeeRegistrationView,
     CompanyEmployeesView, CompanyEmployeeDetailView,
-    SaveQueryView, LoginView, LogoutView, GetQueriesByUserView, GetQueryResponseByIdView, CheckSubscriptionView, CreateCheckoutSessionView,
-    ForgotPasswordView, ResetPasswordView, ChangePasswordView
+    SaveQueryView, LoginView, LogoutView, GetQueriesByUserView, GetQueryResponseByIdView, 
+    CheckSubscriptionView, CreateCheckoutSessionView,
+    ForgotPasswordView, ResetPasswordView, ChangePasswordView,
+    SubscriptionPlansView, BillingHistoryView, ActivateSubscriptionView,
+    RefreshSessionView, SessionStatusView, CancelSubscriptionView
 )
+from .stripe_webhooks import stripe_webhook
 
 urlpatterns = [
     # Individual Users
@@ -22,6 +26,10 @@ urlpatterns = [
     # Login/Logout
     path("login/", LoginView.as_view(), name="login"),
     path("logout/", LogoutView.as_view(), name="logout"),
+
+    # Session Management
+    path("refresh-session/", RefreshSessionView.as_view(), name="refresh_session"),
+    path("session/status/", SessionStatusView.as_view(), name="session_status"),
 
     # Password Management
     path("password/forgot/", ForgotPasswordView.as_view(), name="forgot_password"),
@@ -40,6 +48,13 @@ urlpatterns = [
     path('queries/<uuid:query_id>/response/', GetQueryResponseByIdView.as_view(), name="get_query_response_by_id"),
 
     # Subscription Management
-    path('check-subscription/', CheckSubscriptionView.as_view(), name="check_subscription"),
-    path('create-checkout-session', CreateCheckoutSessionView.as_view(), name="create_checkout_session"),
+    path('subscription/plans/', SubscriptionPlansView.as_view(), name="subscription_plans"),
+    path('subscription/status/', CheckSubscriptionView.as_view(), name="check_subscription"),
+    path('subscription/billing-history/', BillingHistoryView.as_view(), name="billing_history"),
+    path('subscription/create-checkout-session', CreateCheckoutSessionView.as_view(), name="create_checkout_session"),
+    path('subscription/activate', ActivateSubscriptionView.as_view(), name="activate_subscription"),
+    path('subscription/cancel', CancelSubscriptionView.as_view(), name="cancel_subscription"),
+    
+    # Stripe Webhook
+    path('webhook/stripe/', stripe_webhook, name="stripe_webhook"),
 ]

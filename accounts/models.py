@@ -93,10 +93,12 @@ class Query(models.Model):
         return self.query
 
 class SubscriptionPlan(models.Model):
-    plan_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan_id = models.CharField(max_length=50, primary_key=True)
     name = models.CharField(max_length=255)
     price = models.PositiveIntegerField()
     validity = models.PositiveIntegerField()
+    stripe_price_id = models.CharField(max_length=100, blank=True, null=True)
+    is_popular = models.BooleanField(default=False)
 
     def __str__(self):
         return self.name
@@ -108,4 +110,39 @@ class UserSubscriptionManagement(models.Model):
     subscribed_at = models.DateTimeField(auto_now_add=True)
     def __str__(self):
         return self.user.is_active
+
+
+# Stripe Subscription Models
+class Subscription(models.Model):
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE, related_name='stripe_subscription')
+    stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
+    stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True)
+    plan_id = models.CharField(max_length=50)  # 'free', 'pro', 'premium' or the actual plan ID
+    status = models.CharField(max_length=50, default='inactive')  # 'active', 'canceled', 'past_due'
+    current_period_start = models.DateTimeField(null=True, blank=True)
+    current_period_end = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.plan_id} - {self.status}"
+    
+    @property
+    def is_active(self):
+        return self.status == 'active'
+
+
+class Transaction(models.Model):
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='transactions')
+    stripe_invoice_id = models.CharField(max_length=100)
+    stripe_payment_intent_id = models.CharField(max_length=100, blank=True, null=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=50)  # 'succeeded', 'pending', 'failed'
+    description = models.CharField(max_length=255)
+    receipt_url = models.URLField(blank=True, null=True)
+    date = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.email} - ${self.amount} - {self.status}"
 

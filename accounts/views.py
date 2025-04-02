@@ -22,11 +22,14 @@ from django.db import transaction
 from django.http import Http404
 from django.template.loader import render_to_string
 from django.conf import settings
+from django.utils import timezone
+from datetime import datetime, timedelta
+from django.contrib.sessions.backends.db import SessionStore
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
-from .models import IndividualUser, Company, Employee, Query, CustomUser, SubscriptionPlan
+from .models import IndividualUser, Company, Employee, Query, CustomUser, SubscriptionPlan, Subscription, Transaction
 from .serializers import (
     EmailOnlySerializer, 
     VerifyOTPSerializer,
@@ -40,7 +43,7 @@ from .serializers import (
 
 load_dotenv()
 EMPLOYEE_LIMIT = int(os.getenv("EMPLOYEE_LIMIT", 10))
-stripe.api_key = os.getenv("STRIPE_KEY")
+stripe.api_key = settings.STRIPE_SECRET_KEY
 redis_client = redis.StrictRedis(host="localhost", port=6379, db=0, decode_responses=True)
 User = get_user_model()
 
@@ -618,17 +621,25 @@ class GetQueryResponseByIdView(APIView):
 @method_decorator(csrf_exempt, name='dispatch')
 class CreateCheckoutSessionView(APIView):
     authentication_classes = [CsrfExemptSessionAuthentication]
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_description="Creates a Stripe Checkout session for the given plan ID and returns the session ID.",
+        operation_description="Creates a Stripe Checkout session for the given plan ID and returns the checkout URL.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=["plan_id"],
             properties={
                 "plan_id": openapi.Schema(
                     type=openapi.TYPE_STRING,
-                    description="The Stripe Price ID for the subscription or one-time payment."
+                    description="The plan ID to subscribe to"
+                ),
+                "success_url": openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="URL to redirect after successful payment"
+                ),
+                "cancel_url": openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="URL to redirect if payment is cancelled"
                 )
             }
         ),
@@ -638,9 +649,9 @@ class CreateCheckoutSessionView(APIView):
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
-                        "id": openapi.Schema(
+                        "checkout_url": openapi.Schema(
                             type=openapi.TYPE_STRING,
-                            description="The Stripe Checkout Session ID"
+                            description="The URL to redirect the user to Stripe Checkout"
                         )
                     }
                 )
@@ -649,35 +660,69 @@ class CreateCheckoutSessionView(APIView):
         }
     )
     def post(self, request):
-        # Replace with your actual domain
-        plan_id = request.data.get("plan_id")
         try:
-            plan = SubscriptionPlan.objects.get(plan_id=plan_id)
-        except SubscriptionPlan.DoesNotExist:
-            return Response({"error": "Subscription plan not found"}, status=status.HTTP_400_BAD_REQUEST)
-        plan_price = plan.price
-        plan_name = plan.name
-        domain_url = os.getenv("DOMAIN_URL")
-        try:
+            user = request.user
+            plan_id = request.data.get("plan_id")
+            success_url = request.data.get("success_url", settings.FRONTEND_URL + "/payment-success")
+            cancel_url = request.data.get("cancel_url", settings.FRONTEND_URL + "/plans")
+            
+            # Map plan IDs to Stripe Price IDs
+            # In a production environment, you would store these mappings in your database
+            price_mapping = {
+                'free': None,  # Free plan doesn't need payment
+                'basic': 'price_1R7m8NRrRHqE0EfDoscPZ9k1',  
+                'pro': 'price_1R7m8URrRHqE0EfDBvLc8Xh8',
+                'premium': 'price_1R7mAARrRHqE0EfDEOftS1dS'  
+            }
+            
+            # Get the price ID for the selected plan
+            # For this example, we'll use a direct mapping
+            # In a real app, you'd likely fetch this from your database
+            try:
+                # Try to get from database first
+                plan = SubscriptionPlan.objects.get(plan_id=plan_id)
+                price_id = getattr(plan, 'stripe_price_id', None)
+                
+                # If not in database, try fallback mapping
+                if not price_id:
+                    price_id = price_mapping.get(plan_id)
+                    
+                if not price_id:
+                    return Response({"error": f"No price ID found for plan {plan_id}"}, 
+                                   status=status.HTTP_400_BAD_REQUEST)
+                
+                plan_name = plan.name
+                
+            except SubscriptionPlan.DoesNotExist:
+                # Fallback to direct mapping if not in database
+                price_id = price_mapping.get(plan_id)
+                if not price_id:
+                    return Response({"error": f"Plan {plan_id} not found"}, 
+                                   status=status.HTTP_400_BAD_REQUEST)
+                plan_name = plan_id.capitalize()
+            
+            # Create the checkout session
             checkout_session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
-                line_items=[
-                    {
-                        "price_data": {
-                            "currency": "usd",
-                            "unit_amount": int(plan_price),
-                            "product_data": {
-                                "name": f"{plan_name}",
-                            },
-                        },
-                        "quantity": 1,
-                    }
-                ],
-                mode="payment",
-                success_url=domain_url + "/success?session_id={CHECKOUT_SESSION_ID}",
-                cancel_url=domain_url + "/cancel",
+                line_items=[{
+                    'price': price_id,
+                    'quantity': 1,
+                }],
+                mode='subscription',
+                success_url=f"{success_url}?session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=cancel_url,
+                customer_email=user.email,
+                client_reference_id=str(user.id),
+                metadata={
+                    'user_id': str(user.id),
+                    'plan_id': plan_id
+                }
             )
-            return Response({"id": checkout_session.id}, status=status.HTTP_200_OK)
+            
+            return Response({
+                "checkout_url": checkout_session.url
+            }, status=status.HTTP_200_OK)
+            
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -685,14 +730,114 @@ class CreateCheckoutSessionView(APIView):
 @method_decorator(csrf_exempt, name='dispatch')
 class CheckSubscriptionView(APIView):
     authentication_classes = [CsrfExemptSessionAuthentication]
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @swagger_auto_schema(
+        operation_description="Gets the current user's subscription status and details",
+        responses={
+            200: openapi.Response(
+                description="Subscription details retrieved successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "subscription": openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                "is_active": openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                "plan_id": openapi.Schema(type=openapi.TYPE_STRING),
+                                "plan_name": openapi.Schema(type=openapi.TYPE_STRING),
+                                "current_period_end": openapi.Schema(type=openapi.TYPE_STRING, format="date-time"),
+                                "status": openapi.Schema(type=openapi.TYPE_STRING),
+                                "customer_portal_url": openapi.Schema(type=openapi.TYPE_STRING, nullable=True)
+                            }
+                        )
+                    }
+                )
+            ),
+            404: "User not found"
+        }
+    )
     def get(self, request):
-        user = request.user
         try:
-            user = CustomUser.objects.get(email=user)
-        except CustomUser.DoesNotExist:
-            raise NotFound(f"User {user} not found.")
-        return Response({"active": user.is_active}, status=status.HTTP_200_OK)
+            user = request.user
+            
+            # Check if user has a subscription
+            from .models import Subscription
+            try:
+                subscription = Subscription.objects.get(user=user)
+                
+                # Get subscription data
+                subscription_data = {
+                    "is_active": subscription.status == 'active',
+                    "plan_id": subscription.plan_id,
+                    "plan_name": self.get_plan_name(subscription.plan_id),
+                    "status": subscription.status,
+                    "current_period_end": subscription.current_period_end.isoformat() if subscription.current_period_end else None,
+                    "customer_portal_url": self.get_customer_portal_url(subscription.stripe_customer_id) if subscription.stripe_customer_id else None
+                }
+            except Subscription.DoesNotExist:
+                # No subscription found, return default data
+                subscription_data = {
+                    "is_active": False,
+                    "plan_id": "free",
+                    "plan_name": "Free Plan",
+                    "status": "inactive",
+                    "current_period_end": None,
+                    "customer_portal_url": None
+                }
+            
+            return Response({"subscription": subscription_data}, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def get_plan_name(self, plan_id):
+        """Get a human-readable name for the plan"""
+        # First try to get from database
+        try:
+            plan = SubscriptionPlan.objects.get(plan_id=plan_id)
+            return plan.name
+        except SubscriptionPlan.DoesNotExist:
+            # For Stripe product IDs, try to fetch from Stripe
+            if plan_id.startswith('prod_'):
+                try:
+                    # Fetch product details from Stripe
+                    product = stripe.Product.retrieve(plan_id)
+                    if product and 'name' in product:
+                        return product.name
+                except Exception as e:
+                    print(f"Error fetching product from Stripe: {e}")
+            
+            # Map common plan IDs to readable names as fallback
+            plan_name_map = {
+                'free': 'Free Plan',
+                'basic': 'Basic Plan',
+                'pro': 'Professional Plan',
+                'premium': 'Premium Plan',
+                # Add other known plan mappings here
+            }
+            
+            if plan_id.lower() in plan_name_map:
+                return plan_name_map[plan_id.lower()]
+                
+            # Return a formatted version of the ID as last resort
+            return plan_id.replace('_', ' ').title()
+    
+    def get_customer_portal_url(self, stripe_customer_id):
+        """Create a customer portal session for managing subscription"""
+        try:
+            if not stripe_customer_id:
+                return None
+                
+            # Create portal session
+            session = stripe.billing_portal.Session.create(
+                customer=stripe_customer_id,
+                return_url=f"{settings.FRONTEND_URL}/dashboard",
+            )
+            return session.url
+        except Exception as e:
+            print(f"Error creating customer portal: {e}")
+            return None
 
 # ---- Forgot Password (Send OTP) ----
 @method_decorator(csrf_exempt, name='dispatch')
@@ -712,6 +857,13 @@ class ForgotPasswordView(APIView):
     )
     def post(self, request):
         try:
+            # Disable SSL verification for this request
+            import ssl
+            original_context = ssl._create_default_https_context
+            ssl._create_default_https_context = ssl._create_unverified_context
+            
+            print("SSL verification disabled for email sending")
+            
             serializer = ForgotPasswordSerializer(data=request.data)
             if not serializer.is_valid():
                 return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
@@ -722,21 +874,36 @@ class ForgotPasswordView(APIView):
             try:
                 user = CustomUser.objects.get(email=email)
             except CustomUser.DoesNotExist:
+                # Restore SSL context before returning
+                ssl._create_default_https_context = original_context
                 return Response({"error": "Email not registered"}, status=status.HTTP_404_NOT_FOUND)
 
             # Generate and send OTP
             otp = get_random_string(length=6, allowed_chars="0123456789")
             redis_client.setex(f"reset_otp:{email}", 300, otp)
 
-            send_mail(
-                subject="Password Reset OTP",
-                message=f"Your OTP code for password reset is {otp}",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
-            )
-            return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+            try:
+                print(f"Sending OTP email to {email}")
+                send_mail(
+                    subject="Password Reset OTP",
+                    message=f"Your OTP code for password reset is {otp}",
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[email],
+                    fail_silently=False,
+                )
+                print("Email sent successfully")
+                
+                # Restore SSL context
+                ssl._create_default_https_context = original_context
+                
+                return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+            except Exception as e:
+                print(f"Error sending email: {str(e)}")
+                # Restore SSL context
+                ssl._create_default_https_context = original_context
+                raise
         except Exception as e:
+            print(f"Exception in ForgotPasswordView: {str(e)}")
             return Response({"error": "Failed to send OTP", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -979,7 +1146,6 @@ class CompleteEmployeeRegistrationView(APIView):
                 )
                 
                 # Create employee record with today's date as joining_date
-                from django.utils import timezone
                 current_date = timezone.now().date()
                 
                 employee = Employee.objects.create(
@@ -1125,5 +1291,454 @@ class CompanyEmployeeDetailView(APIView):
             return Response(
                 {"error": "Failed to delete employee", "details": str(e)}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+# ---- Subscription Plans ----
+@method_decorator(csrf_exempt, name='dispatch')
+class SubscriptionPlansView(APIView):
+    """
+    Get available subscription plans.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        operation_description="Gets a list of available subscription plans",
+        responses={
+            200: openapi.Response(
+                description="List of plans retrieved successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "plans": openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Items(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    "id": openapi.Schema(type=openapi.TYPE_STRING),
+                                    "name": openapi.Schema(type=openapi.TYPE_STRING),
+                                    "price": openapi.Schema(type=openapi.TYPE_NUMBER),
+                                    "features": openapi.Schema(
+                                        type=openapi.TYPE_ARRAY,
+                                        items=openapi.Items(type=openapi.TYPE_STRING)
+                                    ),
+                                    "validity": openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    "is_popular": openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                    "stripe_price_id": openapi.Schema(type=openapi.TYPE_STRING, nullable=True)
+                                }
+                            )
+                        )
+                    }
+                )
+            )
+        }
+    )
+    def get(self, request):
+        try:
+            # Get all plans from the database
+            plans = SubscriptionPlan.objects.all()
+            
+            # Format plans for response
+            formatted_plans = []
+            for plan in plans:
+                # Get features for the plan (this assumes you have features stored somewhere)
+                features = self.get_plan_features(plan)
+                
+                formatted_plans.append({
+                    "id": str(plan.plan_id),
+                    "name": plan.name,
+                    "price": plan.price / 100,  # Convert from cents to dollars
+                    "features": features,
+                    "validity": plan.validity,
+                    "is_popular": getattr(plan, 'is_popular', False),
+                    "stripe_price_id": getattr(plan, 'stripe_price_id', None)
+                })
+            
+            # If no plans in database, return sample plans
+            if not formatted_plans:
+                formatted_plans = [
+                    {
+                        "id": "free",
+                        "name": "Free",
+                        "price": 0,
+                        "features": ["Basic search functionality", "Limited to 5 queries per day", "No subscription required"],
+                        "validity": 0,  # Unlimited
+                        "is_popular": False,
+                        "stripe_price_id": None
+                    },
+                    {
+                        "id": "basic",
+                        "name": "Basic",
+                        "price": 9.99,
+                        "features": ["Advanced search functionality", "Up to 50 queries per day", "Save search history", "Email support"],
+                        "validity": 30,  # 30 days
+                        "is_popular": False,
+                        "stripe_price_id": "price_basic123"
+                    },
+                    {
+                        "id": "pro",
+                        "name": "Professional",
+                        "price": 19.99,
+                        "features": ["Premium search functionality", "Unlimited queries", "Detailed analysis", "Priority support", "Export capabilities"],
+                        "validity": 30,  # 30 days
+                        "is_popular": True,
+                        "stripe_price_id": "price_pro123"
+                    },
+                    {
+                        "id": "premium",
+                        "name": "Premium",
+                        "price": 49.99,
+                        "features": ["Enterprise-grade search", "Unlimited queries", "Advanced analytics", "24/7 support", "Custom integrations"],
+                        "validity": 30,  # 30 days
+                        "is_popular": False,
+                        "stripe_price_id": "price_premium123"
+                    }
+                ]
+            
+            return Response({"plans": formatted_plans}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def get_plan_features(self, plan):
+        """Get features for a plan. This is a placeholder - implement based on your data model."""
+        # This is a placeholder implementation. You should modify this
+        # based on how you store features for your plans.
+        features_map = {
+            "free": ["Basic search functionality", "Limited to 5 queries per day", "No subscription required"],
+            "basic": ["Advanced search functionality", "Up to 50 queries per day", "Save search history", "Email support"],
+            "pro": ["Premium search functionality", "Unlimited queries", "Detailed analysis", "Priority support", "Export capabilities"],
+            "premium": ["Enterprise-grade search", "Unlimited queries", "Advanced analytics", "24/7 support", "Custom integrations"]
+        }
+        
+        # Try to get features by plan id or return empty list
+        plan_id = str(plan.plan_id).lower()
+        return features_map.get(plan_id, [])
+
+# ---- Billing History ----
+@method_decorator(csrf_exempt, name='dispatch')
+class BillingHistoryView(APIView):
+    """
+    Get user's billing history.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Gets the current user's billing history",
+        responses={
+            200: openapi.Response(
+                description="Billing history retrieved successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "transactions": openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Items(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    "id": openapi.Schema(type=openapi.TYPE_INTEGER),
+                                    "amount": openapi.Schema(type=openapi.TYPE_NUMBER),
+                                    "date": openapi.Schema(type=openapi.TYPE_STRING, format="date-time"),
+                                    "description": openapi.Schema(type=openapi.TYPE_STRING),
+                                    "status": openapi.Schema(type=openapi.TYPE_STRING),
+                                    "receipt_url": openapi.Schema(type=openapi.TYPE_STRING, nullable=True)
+                                }
+                            )
+                        )
+                    }
+                )
+            )
+        }
+    )
+    def get(self, request):
+        try:
+            user = request.user
+            
+            # Get transactions from the database
+            from .models import Transaction
+            transactions = Transaction.objects.filter(user=user).order_by('-date')
+            
+            # Format transactions for response
+            formatted_transactions = []
+            for transaction in transactions:
+                formatted_transactions.append({
+                    "id": transaction.id,
+                    "amount": float(transaction.amount),
+                    "date": transaction.date.isoformat(),
+                    "description": transaction.description,
+                    "status": transaction.status,
+                    "receipt_url": transaction.receipt_url
+                })
+            
+            return Response({"transactions": formatted_transactions}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ---- Manual Subscription Activation (for testing) ----
+@method_decorator(csrf_exempt, name='dispatch')
+class ActivateSubscriptionView(APIView):
+    """
+    Manually activate a subscription after successful payment (for testing)
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @swagger_auto_schema(
+        operation_description="Manually activates a subscription after successful payment (for testing)",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["plan_id"],
+            properties={
+                "plan_id": openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="The plan ID to subscribe to"
+                )
+            }
+        ),
+        responses={
+            200: "Subscription activated successfully",
+            400: "Error activating subscription"
+        }
+    )
+    def post(self, request):
+        try:
+            user = request.user
+            plan_id = request.data.get("plan_id")
+            
+            if not plan_id:
+                return Response({"error": "plan_id is required"}, 
+                               status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get plan details
+            try:
+                plan = SubscriptionPlan.objects.get(plan_id=plan_id)
+            except SubscriptionPlan.DoesNotExist:
+                return Response({"error": f"Plan {plan_id} not found"}, 
+                               status=status.HTTP_400_BAD_REQUEST)
+            
+            # Create or update subscription
+            subscription, created = Subscription.objects.get_or_create(
+                user=user,
+                defaults={
+                    'plan_id': plan_id,
+                    'status': 'active',
+                    'current_period_start': timezone.now(),
+                    'current_period_end': timezone.now() + timedelta(days=plan.validity)
+                }
+            )
+            
+            if not created:
+                subscription.plan_id = plan_id
+                subscription.status = 'active'
+                subscription.current_period_start = timezone.now()
+                subscription.current_period_end = timezone.now() + timedelta(days=plan.validity)
+                subscription.save()
+            
+            # Create a test transaction record
+            Transaction.objects.create(
+                user=user,
+                stripe_invoice_id=f"test_invoice_{timezone.now().timestamp()}",
+                amount=plan.price / 100,  # Convert from cents to dollars
+                status='succeeded',
+                description=f"Test payment for {plan.name}",
+                date=timezone.now()
+            )
+                
+            return Response({
+                "message": "Subscription activated successfully",
+                "subscription": {
+                    "plan_id": subscription.plan_id,
+                    "status": subscription.status,
+                    "current_period_end": subscription.current_period_end.isoformat() if subscription.current_period_end else None
+                }
+            }, status=status.HTTP_200_OK)
+                
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class RefreshSessionView(APIView):
+    """
+    Refreshes an expired or about-to-expire session with a new session ID.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        responses={
+            200: openapi.Response("New session ID"),
+            401: "Invalid session",
+            400: "No session ID provided"
+        }
+    )
+    def post(self, request):
+        try:
+            # Get current session ID from header
+            current_session_id = request.META.get('HTTP_X_SESSION_ID')
+            if not current_session_id:
+                return Response({"error": "No session ID provided"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Load the session from the store
+            session_store = SessionStore(current_session_id)
+            
+            # Check if session exists and retrieve user_id
+            if not session_store.exists(current_session_id) or '_auth_user_id' not in session_store:
+                return Response({"error": "Invalid session"}, status=status.HTTP_401_UNAUTHORIZED)
+            
+            user_id = session_store.get('_auth_user_id')
+            
+            # Check if user still exists and is active
+            try:
+                user = CustomUser.objects.get(pk=user_id)
+                if not user.is_active:
+                    return Response({"error": "User account is inactive"}, status=status.HTTP_401_UNAUTHORIZED)
+            except CustomUser.DoesNotExist:
+                return Response({"error": "User not found"}, status=status.HTTP_401_UNAUTHORIZED)
+            
+            # Create a new session for the user
+            login(request, user)
+            request.session.save()  # Ensure the session is saved
+            
+            # Return the new session ID
+            return Response({"session_id": request.session.session_key}, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response({"error": "Session refresh failed", "details": str(e)}, 
+                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SessionStatusView(APIView):
+    """
+    Checks if the current session is valid and authenticated.
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        responses={
+            200: openapi.Response("Session status"),
+        }
+    )
+    def get(self, request):
+        try:
+            # Get session ID from header
+            session_id = request.META.get('HTTP_X_SESSION_ID')
+            
+            if not session_id:
+                return Response({"is_authenticated": False}, status=status.HTTP_200_OK)
+            
+            # Load the session
+            session_store = SessionStore(session_id)
+            
+            # Check if session exists and contains user ID
+            if not session_store.exists(session_id) or '_auth_user_id' not in session_store:
+                return Response({"is_authenticated": False}, status=status.HTTP_200_OK)
+            
+            # Check if user exists and is active
+            try:
+                user_id = session_store.get('_auth_user_id')
+                user = CustomUser.objects.get(pk=user_id)
+                is_authenticated = user.is_active
+            except CustomUser.DoesNotExist:
+                is_authenticated = False
+            
+            return Response({"is_authenticated": is_authenticated}, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            # Even in case of errors, we don't consider the user authenticated
+            return Response({"is_authenticated": False, "error": str(e)}, status=status.HTTP_200_OK)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class CancelSubscriptionView(APIView):
+    """
+    Cancels the user's subscription (sets it to not renew at the period end).
+    """
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Cancel the user's subscription, which will stop it from renewing at the end of the current period.",
+        responses={
+            200: openapi.Response(
+                description="Subscription cancellation successful",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "success": openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        "message": openapi.Schema(type=openapi.TYPE_STRING),
+                        "current_period_end": openapi.Schema(
+                            type=openapi.TYPE_STRING, 
+                            format="date-time"
+                        )
+                    }
+                )
+            ),
+            400: "Error cancelling subscription",
+            404: "Subscription not found"
+        }
+    )
+    def post(self, request):
+        try:
+            # Print debugging information
+            print(f"CancelSubscriptionView: User ID = {request.user.id}, Email = {request.user.email}")
+            
+            # Get the user's active subscription
+            try:
+                subscription = Subscription.objects.get(user=request.user, status__in=['active', 'trialing'])
+                print(f"Found subscription: ID={subscription.id}, Status={subscription.status}, Stripe ID={subscription.stripe_subscription_id}")
+            except Subscription.DoesNotExist:
+                print(f"No active subscription found for user {request.user.email}")
+                return Response(
+                    {"error": "No active subscription found for this user"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+                
+            if not subscription.stripe_subscription_id:
+                print(f"Missing Stripe subscription ID for subscription {subscription.id}")
+                return Response(
+                    {"error": "Missing Stripe subscription ID"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            print(f"Attempting to cancel Stripe subscription: {subscription.stripe_subscription_id}")
+            
+            # Cancel in Stripe (set to not renew at period end)
+            stripe_subscription = stripe.Subscription.modify(
+                subscription.stripe_subscription_id,
+                cancel_at_period_end=True
+            )
+            
+            print(f"Stripe subscription modified successfully: {subscription.stripe_subscription_id}")
+            
+            # Update the local subscription record
+            subscription.status = "active_until_period_end"
+            subscription.save()
+            
+            # Get the end date of the current period
+            timestamp = stripe_subscription.current_period_end
+            current_period_end = timezone.datetime.fromtimestamp(timestamp)
+            # Make the datetime timezone-aware
+            current_period_end = timezone.make_aware(current_period_end)
+            
+            return Response({
+                "success": True,
+                "message": "Your subscription will not renew after the current period ends.",
+                "current_period_end": current_period_end.isoformat()
+            }, status=status.HTTP_200_OK)
+            
+        except stripe.error.StripeError as e:
+            print(f"Stripe error when cancelling subscription: {str(e)}")
+            return Response(
+                {"error": f"Stripe error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            import traceback
+            print(f"Unexpected error when cancelling subscription: {str(e)}")
+            traceback.print_exc()
+            return Response(
+                {"error": f"An error occurred: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
             )
 
