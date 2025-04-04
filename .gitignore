@@ -2,7 +2,14 @@
 *.py[cod]
 __pycache__/
 *.so
+# Django migrations
+*/migrations/
 
+# .env file
+.env
+
+# Django settings (if you want to ignore settings.py)
+settings.py
 # Virtual environments
 .env
 .venv
