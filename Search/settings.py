@@ -131,7 +131,6 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
-STATIC_URL = 'static/'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
@@ -192,5 +191,10 @@ STRIPE_WEBHOOK_SECRET = 'whsec_xMUDO69Ei6W0Wdlvlh8u36RkVnjcjbVK'  # Stripe webho
 
 # Frontend URL for redirect after payment
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')  # Change this to your actual frontend URL
+STATIC_URL = '/static/'
+MEDIA_URL = '/media/'
 
+
+STATIC_ROOT = os.path.join(BASE_DIR, 'static')
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
