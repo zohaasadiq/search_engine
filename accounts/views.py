@@ -530,14 +530,23 @@ class SaveQueryView(APIView):
             type=openapi.TYPE_OBJECT,
             properties={
                 "query": openapi.Schema(type=openapi.TYPE_STRING),
-                "corrected_query": openapi.Schema(type=openapi.TYPE_STRING),
-                "summary": openapi.Schema(type=openapi.TYPE_STRING),
-                "references": openapi.Schema(
-                    type=openapi.TYPE_ARRAY,
-                    items=openapi.Schema(type=openapi.TYPE_OBJECT)
-                ),
+                "result": openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "corrected_query": openapi.Schema(type=openapi.TYPE_STRING),
+                        "summary": openapi.Schema(type=openapi.TYPE_STRING),
+                        "references": openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Schema(type=openapi.TYPE_OBJECT)
+                        ),
+                        "main_sources": openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Schema(type=openapi.TYPE_OBJECT)
+                        ),
+                    }
+                )
             },
-            required=["query", "summary"]
+            required=["query", "result"]
         ),
         responses={
             201: openapi.Response("Query saved"),
@@ -545,32 +554,33 @@ class SaveQueryView(APIView):
         }
     )
     def post(self, request):
-
-        print(request.user)
+        print(f"SaveQueryView received data: {request.data}")
         data = request.data
 
-        query_text = data.get("query")
+        query_text = data.get("query", "")
+        
+        # Extract data from the nested result object
+        result = data.get("result", {})
+        corrected_query = result.get("corrected_query", "")
+        summary = result.get("summary", "")
+        references = result.get("references", [])
 
-        corrected_query = data.get("corrected_query", "")
-
-        summary = data.get("summary", "")
-
-        references = data.get("references", [])
-
-
-        if not query_text or not data:
-            return Response({"error": "Query and results are required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not query_text:
+            return Response({"error": "Query is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         user_instance = CustomUser.objects.get(pk=request.user.pk)
 
+        # Print debug information
+        print(f"Saving query with summary: {summary[:100]}...")
+        print(f"Saving query with references: {references}")
 
         query = Query.objects.create(
             user=user_instance,
-            query= query_text,
-            response_text= data,
-            summary= summary,
-            corrected_query= corrected_query,
-            references= references
+            query=query_text,
+            response_text=json.dumps(data),  # Store the entire data as JSON string
+            summary=summary,
+            corrected_query=corrected_query,
+            references=references
         )
 
         return Response(
@@ -608,15 +618,22 @@ class GetQueryResponseByIdView(APIView):
     def get(self, request, query_id):
         try:
             query = Query.objects.get(query_id=query_id)
+            
+            # Print debug information
+            print(f"Retrieved query: {query.query_id}")
+            print(f"Summary: {query.summary[:100] if query.summary else 'None'}")
+            print(f"References: {query.references}")
+            
+            query_response = {
+                "query_id": query.query_id,
+                "query": query.query,
+                "corrected_query": query.corrected_query or "",
+                "summary": query.summary or "",
+                "references": query.references or []
+            }
+            return Response(query_response, status=status.HTTP_200_OK)
         except Query.DoesNotExist:
             raise NotFound(f"Query with id {query_id} not found.")
-        query_response = {
-            "query_id": query.query_id,
-            "corrected_query" : query.corrected_query,
-            "summary": query.summary,
-            "references": query.references
-        }
-        return Response(query_response, status=status.HTTP_200_OK)
 
 @method_decorator(csrf_exempt, name='dispatch')
 class CreateCheckoutSessionView(APIView):

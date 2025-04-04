@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+venv/
+ENV/
+env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Database
+*.sqlite3
+db.sqlite3
+
+# Local media and static files
+media/
+staticfiles/
+
+# Docker
+.dockerignore
+Dockerfile
+Dockerfile.dev
+docker-compose*.yml
+
+# Log files
+*.log
+
+# Temporary files
+tmp/
+.DS_Store 
