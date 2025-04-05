@@ -308,7 +308,7 @@ class CompanySignupView(APIView):
 
             otp = get_random_string(length=6, allowed_chars="0123456789")
             redis_client.setex(f"otp:{email}", 300, otp)  # OTP valid for 5 minutes
-
+            print(f"Passed {otp}")
             send_mail(
                 subject="Your Company Registration OTP",
                 message=f"Your OTP code for company registration is {otp}",
@@ -318,6 +318,7 @@ class CompanySignupView(APIView):
             )
             return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
         except Exception as e:
+            print(e)
             return Response({"error": "Failed to send OTP", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
